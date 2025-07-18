@@ -1,0 +1,129 @@
+import streamlit as st
+import pandas as pd
+import datetime
+from io import BytesIO
+
+st.set_page_config(page_title="Construction Scheduler", layout="wide")
+
+# --- In-memory storage ---
+if "labour" not in st.session_state:
+    st.session_state.labour = pd.DataFrame(columns=["Name", "Role", "Assigned Dates"])
+
+if "equipment" not in st.session_state:
+    st.session_state.equipment = pd.DataFrame(columns=["Name", "Type", "Assigned Dates"])
+
+if "schedule" not in st.session_state:
+    st.session_state.schedule = pd.DataFrame(columns=["Date", "Type", "Name", "Project"])
+
+# --- Sidebar: Resource Management ---
+with st.sidebar:
+    st.header("Add Resources")
+    res_type = st.selectbox("Resource Type", ["Labour", "Equipment"])
+    name = st.text_input("Name")
+    role_type = st.text_input("Role" if res_type == "Labour" else "Equipment Type")
+    if st.button("Add Resource"):
+        if name and role_type:
+            if res_type == "Labour":
+                st.session_state.labour.loc[len(st.session_state.labour)] = [name, role_type, []]
+            else:
+                st.session_state.equipment.loc[len(st.session_state.equipment)] = [name, role_type, []]
+            st.success(f"{res_type} added!")
+        else:
+            st.warning("Please fill all fields.")
+
+# --- Tabs ---
+tab1, tab2, tab3, tab4 = st.tabs(["📅 Daily Schedule", "📊 Weekly Gantt", "📌 Assign Task", "📂 Unassigned Bench"])
+
+# --- Daily Schedule ---
+with tab1:
+    st.subheader("📅 Daily Schedule")
+    selected_date = st.date_input("Select Date", datetime.date.today())
+    filtered = st.session_state.schedule[st.session_state.schedule["Date"] == str(selected_date)]
+    st.dataframe(filtered, use_container_width=True)
+
+    if not filtered.empty:
+        to_remove = st.selectbox("Remove Task", options=filtered.index, format_func=lambda i: f'{filtered.loc[i, "Type"]}: {filtered.loc[i, "Name"]} → {filtered.loc[i, "Project"]}')
+        if st.button("Remove Selected Task"):
+            res_type = filtered.loc[to_remove, "Type"]
+            name = filtered.loc[to_remove, "Name"]
+            date = filtered.loc[to_remove, "Date"]
+
+            if res_type == "Labour":
+                idx = st.session_state.labour[st.session_state.labour["Name"] == name].index[0]
+                st.session_state.labour.at[idx, "Assigned Dates"] = [d for d in st.session_state.labour.at[idx, "Assigned Dates"] if d != date]
+            else:
+                idx = st.session_state.equipment[st.session_state.equipment["Name"] == name].index[0]
+                st.session_state.equipment.at[idx, "Assigned Dates"] = [d for d in st.session_state.equipment.at[idx, "Assigned Dates"] if d != date]
+
+            st.session_state.schedule.drop(index=to_remove, inplace=True)
+            st.success("Task removed.")
+
+    if st.button("📤 Export to Excel"):
+        out = BytesIO()
+        filtered.to_excel(out, index=False)
+        st.download_button("Download Excel", data=out.getvalue(), file_name=f"schedule_{selected_date}.xlsx")
+
+# --- Weekly Gantt View ---
+with tab2:
+    st.subheader("📊 Weekly Gantt View")
+    start_week = st.date_input("Start of Week", datetime.date.today())
+    days = [(start_week + datetime.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+
+    def build_gantt(df, label):
+        if df.empty:
+            return pd.DataFrame(columns=["Name"] + days)
+
+        gantt_df = pd.DataFrame()
+        gantt_df["Name"] = df["Name"]
+        for day in days:
+            gantt_df[day] = gantt_df["Name"].apply(
+                lambda name: st.session_state.schedule[
+                    (st.session_state.schedule["Name"] == name) &
+                    (st.session_state.schedule["Date"] == day)
+                ]["Project"].values[0] if not st.session_state.schedule[
+                    (st.session_state.schedule["Name"] == name) &
+                    (st.session_state.schedule["Date"] == day)
+                ].empty else ""
+            )
+        return gantt_df
+
+    st.markdown("**👷 Labour**")
+    st.dataframe(build_gantt(st.session_state.labour, "Labour"), use_container_width=True)
+    st.markdown("**🔧 Equipment**")
+    st.dataframe(build_gantt(st.session_state.equipment, "Equipment"), use_container_width=True)
+
+# --- Task Assignment ---
+with tab3:
+    st.subheader("📌 Assign Task")
+    res_type = st.selectbox("Type", ["Labour", "Equipment"], key="assign_type")
+    if res_type == "Labour":
+        res_df = st.session_state.labour
+    else:
+        res_df = st.session_state.equipment
+
+    available = res_df[res_df["Assigned Dates"].apply(lambda x: len(x) < 30)]
+    name = st.selectbox("Select Resource", available["Name"])
+    project = st.text_input("Project Name")
+    assign_date = st.date_input("Assignment Date", datetime.date.today(), key="assign_date")
+
+    if st.button("Assign"):
+        date_str = str(assign_date)
+        if name in st.session_state.schedule[st.session_state.schedule["Date"] == date_str]["Name"].values:
+            st.error("❌ Already assigned on this date!")
+        else:
+            st.session_state.schedule.loc[len(st.session_state.schedule)] = [date_str, res_type, name, project]
+            idx = res_df[res_df["Name"] == name].index[0]
+            st.session_state[res_type.lower()].at[idx, "Assigned Dates"].append(date_str)
+            st.success("✅ Assigned!")
+
+# --- Bench View ---
+with tab4:
+    st.subheader("📂 Unassigned Resources")
+
+    st.markdown("**👷 Labour Not Assigned**")
+    unassigned_labour = st.session_state.labour[st.session_state.labour["Assigned Dates"].apply(len) == 0]
+    st.dataframe(unassigned_labour.drop(columns=["Assigned Dates"]), use_container_width=True)
+
+    st.markdown("**🔧 Equipment Not Assigned**")
+    unassigned_equip = st.session_state.equipment[st.session_state.equipment["Assigned Dates"].apply(len) == 0]
+    st.dataframe(unassigned_equip.drop(columns=["Assigned Dates"]), use_container_width=True)
